@@ -1,106 +1,114 @@
-# TM Skills MCP Server
+# TM Skills MCP Server v2
 
-An [MCP](https://modelcontextprotocol.io/) server that exposes a Talent Management Skills API as tools for AI assistants. Built for [Joule](https://www.sap.com/products/artificial-intelligence/ai-assistant.html) agents on SAP BTP, but works with any MCP-compatible client.
+An [MCP](https://modelcontextprotocol.io/) server that exposes the Talent Management Skills API — including attrition prediction — as tools, resources, and prompts for AI assistants (e.g. Joule agents on SAP BTP).
 
 ## How it works
 
 ```
 AI Assistant (Joule / Claude / etc.)
-        │
-        │  MCP protocol (Streamable HTTP)
-        ▼
-┌─────────────────────┐
-│  TM Skills MCP      │  ← This project
-│  Server             │
-└────────┬────────────┘
-         │  HTTP + API key
-         ▼
-┌─────────────────────┐
-│  TM Skills API      │  ← Separate FastAPI service
-│  (REST)             │
-└────────┬────────────┘
-         │
-         ▼
+        |
+        |  MCP protocol (Streamable HTTP)
+        v
++---------------------+
+|  TM Skills MCP      |  <-- This project
+|  Server v2          |
++--------+------------+
+         |  HTTP + API key
+         v
++---------------------+
+|  TM Skills API      |  <-- Separate FastAPI service
+|  (REST)             |
++--------+------------+
+         |
+         v
     PostgreSQL
 ```
 
 The MCP server is a thin wrapper — it translates MCP tool calls into HTTP requests to the TM Skills API. Authentication, rate limiting, and input validation all happen at the API layer.
 
-## Quick start
+## Project structure
+
+```
+server.py              Main server: MCP tools, resources, prompts, UI view, audit REST
+audit.py               SQLite-backed audit logger (lazy init, WAL mode)
+config.py              Configuration via pydantic-settings (.env + env vars)
+resources/
+  tm_schema.sql        TM database schema (served as MCP resource)
+  business_questions.md  Business questions catalog (served as MCP resource)
+deploy.sh              Automated CF deployment with secret management
+manifest.yml           CF app config (memory, health check, env vars)
+Procfile               CF start command
+requirements.txt       Production deps for CF Python buildpack
+runtime.txt            Python version pin for CF
+pyproject.toml         Project metadata and dependencies
+.env.example           Environment variable template
+```
+
+## Setup
+
+**Prerequisites:** Python 3.10+, access to the TM Skills API
 
 ```bash
 pip install -e .
 cp .env.example .env       # Set TM_API_BASE_URL and TM_API_KEY
-python server.py           # Streamable HTTP server on http://localhost:8080/mcp
+python server.py           # Starts on http://localhost:8080
 ```
 
-For interactive testing with the MCP Inspector:
+| URL | What |
+|-----|------|
+| `http://localhost:8080/` | UI view — lists all tools, resources, and prompts |
+| `http://localhost:8080/mcp` | MCP endpoint (for AI clients) |
+| `http://localhost:8080/audit/summary` | Audit stats (JSON) |
+
+## Deployment (Cloud Foundry — SAP BTP)
+
+### Using `deploy.sh`
 
 ```bash
-pip install mcp[cli]       # Inspector tooling (not needed for production)
-mcp dev server.py
+./deploy.sh
 ```
 
-## Connecting an AI assistant
+The script:
+1. Reads the API key from `../talent-management-app/.api-key`
+2. Runs `cf push --no-start` (deploys without starting)
+3. Injects the key via `cf set-env TM_API_KEY`
+4. Starts the app
 
-Point any MCP client at the endpoint:
+This keeps the secret out of `manifest.yml` and version control. If the key file doesn't exist, it prompts for manual input.
 
+### Manual deploy
+
+```bash
+cf push --no-start
+cf set-env tm-skills-mcp-v2 TM_API_KEY "your-api-key"
+cf start tm-skills-mcp-v2
 ```
-https://tm-skills-mcp.cfapps.ap10.hana.ondemand.com/mcp
-```
 
-The client will discover 13 tools, 2 resources, and 3 prompt templates automatically via the MCP handshake.
+### Important notes
 
-**In Joule Studio:** Add the URL above as an MCP tool server when building a Joule Agent.
+- **`manifest.yml` must NOT contain `TM_API_KEY`** — `cf push` re-applies manifest env vars on every deploy, which would overwrite the value set by `cf set-env`.
+- **`$PORT` is set by CF** — the server reads it from the environment automatically.
+- 256M memory is sufficient for the MCP SDK + httpx stack.
+- The audit SQLite DB is ephemeral — it resets on each redeploy.
 
-## Tools
+### Live URLs
 
-13 read-only tools, one per API endpoint. The AI assistant chains them to answer talent questions — for example, `browse_skills("Python")` to get the skill ID, then `get_top_experts(skill_id=1)` to find experts.
+| URL | What |
+|-----|------|
+| https://tm-skills-mcp-v2.cfapps.ap10.hana.ondemand.com/ | UI view |
+| https://tm-skills-mcp-v2.cfapps.ap10.hana.ondemand.com/mcp | MCP endpoint |
+| https://tm-skills-mcp-v2.cfapps.ap10.hana.ondemand.com/audit/summary | Audit stats |
+| https://tm-skills-mcp-v2.cfapps.ap10.hana.ondemand.com/audit/recent | Recent tool calls |
 
-### Employee tools
+**CF org/space:** `SEAIO_dial-3-0-zme762l7 / dev`
 
-| Tool | What it answers |
-|------|----------------|
-| `get_employee_skills` | What skills does this person have? |
-| `get_top_skills` | What are their strongest skills? |
-| `get_evidence_inventory` | What evidence exists across all their skills? |
-| `get_skill_evidence` | Why do we think they're proficient in a specific skill? |
+## MCP tools, resources, and prompts
 
-### Skill tools
+The server exposes **21 tools** (18 TM API + 3 audit), **2 resources**, and **5 prompts**.
 
-| Tool | What it answers |
-|------|----------------|
-| `browse_skills` | What skills exist in the catalog? (start here to find IDs) |
-| `get_top_experts` | Who are the best people for this skill? |
-| `get_skill_coverage` | How is proficiency distributed across the org? |
-| `get_evidence_backed_candidates` | Who has this skill AND strong evidence to prove it? |
-| `get_stale_skills` | Whose skill records need revalidation? |
-| `get_cooccurring_skills` | What other skills commonly appear alongside this one? |
-| `search_talent` | Who has ALL of these skills? (multi-skill AND search) |
+Visit the [UI view](https://tm-skills-mcp-v2.cfapps.ap10.hana.ondemand.com/) for a live listing with descriptions and parameters, or run `python server.py` locally and open `http://localhost:8080/`.
 
-### Org tools
-
-| Tool | What it answers |
-|------|----------------|
-| `get_org_skill_summary` | What are the top skills in this org unit? |
-| `get_org_skill_experts` | Who in this org has a specific skill? |
-
-## Resources and prompts
-
-**Resources** provide static context that the AI can reference:
-
-| URI | Content |
-|-----|---------|
-| `tm://schema` | Database schema DDL |
-| `tm://business-questions` | Business questions catalog with API mappings |
-
-**Prompts** are reusable templates that script multi-step tool chains:
-
-| Prompt | Example use |
-|--------|-------------|
-| `find_experts(skill_name)` | "Find the top Python experts and show their evidence" |
-| `analyze_employee(employee_id)` | "Build a comprehensive talent profile for EMP000001" |
-| `org_talent_review(org_unit_id)` | "Assess the talent landscape in ORG030" |
+**Connecting an AI client:** Point any MCP client at the `/mcp` endpoint. In Joule Studio, add the URL as an MCP tool server.
 
 ## Configuration
 
@@ -113,44 +121,14 @@ All settings come from environment variables (or a `.env` file locally):
 | `TM_API_BASE_URL` | `http://localhost:8000` | TM Skills API URL |
 | `TM_API_KEY` | *(empty)* | API key for the TM Skills API |
 | `TM_API_TIMEOUT` | `30.0` | HTTP request timeout in seconds |
-
-## Deploy to Cloud Foundry
-
-```bash
-./deploy.sh
-```
-
-The script reads the API key from `../tm_app/.api-key`, pushes the app without starting it, injects the key via `cf set-env`, then starts the app. This keeps the secret out of `manifest.yml` and version control.
-
-### Manual deploy
-
-```bash
-cf push --no-start
-cf set-env tm-skills-mcp TM_API_KEY "your-api-key"
-cf start tm-skills-mcp
-```
-
-### Live deployment
-
-| | URL |
-|-|-----|
-| **MCP endpoint** | `https://tm-skills-mcp.cfapps.ap10.hana.ondemand.com/mcp` |
-| **TM Skills API** | `https://tm-skills-api.cfapps.ap10.hana.ondemand.com` |
-| **CF space** | `SEAIO_dial-3-0-zme762l7 / dev` |
+| `AUDIT_DB_PATH` | `audit.db` | SQLite audit database file path |
+| `CORS_ORIGINS` | `http://localhost:5173,...` | Comma-separated CORS origins (for monitoring dashboard) |
 
 ## ID formats
 
-These are validated by the API:
+These are validated by the API — useful for testing:
 
 - **Employee IDs:** `EMP` + 6 digits (e.g. `EMP000001`)
 - **Org IDs:** `ORG` + 1-4 digits + optional letter (e.g. `ORG030`, `ORG031B`)
 - **Skill IDs:** numeric (e.g. `1`, `42`)
 - **Categories:** `technical`, `functional`, `leadership`, `domain`, `tool`, `other`
-
-## Tech stack
-
-- **MCP SDK:** [mcp](https://pypi.org/project/mcp/) (Python SDK with FastMCP)
-- **HTTP client:** [httpx](https://www.python-httpx.org/) (async)
-- **Configuration:** [pydantic-settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/) (`.env` + env vars)
-- **Transport:** Streamable HTTP (MCP spec 2025-03-26)
-- **Python:** 3.10+

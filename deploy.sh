@@ -10,7 +10,7 @@
 set -euo pipefail
 
 APP_NAME="tm-skills-mcp-v2"
-API_KEY_FILE="../tm_app/.api-key"
+API_KEY_FILE="../talent-management-app/.api-key"
 
 # ── Get API key ───────────────────────────────────────────────────────────
 if [ -f "$API_KEY_FILE" ]; then

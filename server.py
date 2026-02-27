@@ -10,15 +10,12 @@ from pathlib import Path
 import httpx
 from mcp.server.fastmcp import Context, FastMCP
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse
 
 from audit import AuditLogger
 from config import settings
 
-# ---------------------------------------------------------------------------
 # Audit logger — module-level so MCP tools and REST endpoints share it
-# ---------------------------------------------------------------------------
-
 audit_logger = AuditLogger(settings.audit_db_path)
 
 
@@ -28,10 +25,6 @@ async def audit_lifespan(app: FastMCP) -> AsyncIterator[dict]:
     yield {}
     await audit_logger.close()
 
-
-# ---------------------------------------------------------------------------
-# Server setup
-# ---------------------------------------------------------------------------
 
 mcp = FastMCP(
     "tm-skills-v2",
@@ -52,11 +45,6 @@ mcp = FastMCP(
 RESOURCES_DIR = Path(__file__).parent / "resources"
 
 
-# ---------------------------------------------------------------------------
-# @audited decorator — wraps tool functions with audit logging
-# ---------------------------------------------------------------------------
-
-
 def audited(fn):
     """Decorator that logs tool invocations to the audit database.
 
@@ -70,7 +58,6 @@ def audited(fn):
         success = True
         error_msg = None
 
-        # Extract context metadata (graceful degradation if unavailable)
         request_id = None
         session_id = None
         client_name = None
@@ -78,19 +65,16 @@ def audited(fn):
         try:
             ctx: Context | None = kwargs.get("ctx")
             if ctx:
-                # Session ID from the MCP session
                 try:
                     session_id = ctx.session.client_params.meta.sessionId
                 except Exception:
                     pass
-                # Client info from MCP handshake
                 try:
                     client_info = ctx.session.client_params.clientInfo
                     client_name = client_info.name
                     client_version = client_info.version
                 except Exception:
                     pass
-                # Request ID from the current JSON-RPC message
                 try:
                     request_id = str(ctx.request_id)
                 except Exception:
@@ -98,7 +82,6 @@ def audited(fn):
         except Exception:
             pass
 
-        # Build parameter dict (exclude ctx)
         params = {k: v for k, v in kwargs.items() if k != "ctx"}
 
         try:
@@ -128,11 +111,6 @@ def audited(fn):
     return wrapper
 
 
-# ---------------------------------------------------------------------------
-# HTTP client helper
-# ---------------------------------------------------------------------------
-
-
 async def _api_get(path: str, params: dict | None = None) -> str:
     """Make a GET request to the TM Skills API and return the JSON response as a string."""
     headers = {}
@@ -148,9 +126,7 @@ async def _api_get(path: str, params: dict | None = None) -> str:
         return response.text
 
 
-# ===========================================================================
-# RESOURCES — static context for the LLM
-# ===========================================================================
+# --- Resources ---
 
 
 @mcp.resource("tm://schema")
@@ -165,11 +141,7 @@ def get_business_questions() -> str:
     return (RESOURCES_DIR / "business_questions.md").read_text()
 
 
-# ===========================================================================
-# TOOLS — one per API endpoint
-# ===========================================================================
-
-# --- Employee-centric tools (Endpoints 1, 2, 8, 10) ---
+# --- Employee tools ---
 
 
 @mcp.tool()
@@ -225,7 +197,7 @@ async def get_evidence_inventory(employee_id: str, ctx: Context = None) -> str:
     return await _api_get(f"/tm/employees/{employee_id}/evidence")
 
 
-# --- Skill-centric tools (Endpoints 3, 4, 6, 7, 9, 11) ---
+# --- Skill tools ---
 
 
 @mcp.tool()
@@ -361,7 +333,7 @@ async def get_cooccurring_skills(
     )
 
 
-# --- Talent search tool (Endpoint 5) ---
+# --- Talent search ---
 
 
 @mcp.tool()
@@ -384,7 +356,7 @@ async def search_talent(
     )
 
 
-# --- Org-centric tools (Endpoint 12) ---
+# --- Org tools ---
 
 
 @mcp.tool()
@@ -431,7 +403,7 @@ async def get_org_skill_experts(
     )
 
 
-# --- Attrition prediction tools (Endpoints 13–16) ---
+# --- Attrition tools ---
 
 
 @mcp.tool()
@@ -512,7 +484,7 @@ async def get_org_attrition_summary(
     })
 
 
-# --- Employee search tool ---
+# --- Employee search ---
 
 
 @mcp.tool()
@@ -531,9 +503,7 @@ async def search_employees(name: str, ctx: Context = None, limit: float = 20) ->
     })
 
 
-# ===========================================================================
-# AUDIT TOOLS — MCP tools for querying audit data (NOT audited themselves)
-# ===========================================================================
+# --- Audit tools (not audited themselves) ---
 
 
 @mcp.tool()
@@ -589,9 +559,7 @@ async def audit_get_summary() -> str:
     return json.dumps(stats, indent=2)
 
 
-# ===========================================================================
-# AUDIT REST ENDPOINTS — plain HTTP access for visualization / curl
-# ===========================================================================
+# --- Audit REST endpoints ---
 
 
 @mcp.custom_route("/audit/recent", methods=["GET"])
@@ -621,9 +589,136 @@ async def audit_summary_http(request: Request) -> JSONResponse:
     return JSONResponse(stats)
 
 
-# ===========================================================================
-# PROMPTS — reusable prompt templates
-# ===========================================================================
+# --- UI view ---
+
+TOOL_CATEGORIES = {
+    "Employee": ["get_employee_skills", "get_skill_evidence", "get_top_skills",
+                 "get_evidence_inventory", "search_employees"],
+    "Skill": ["browse_skills", "get_top_experts", "get_skill_coverage",
+              "get_evidence_backed_candidates", "get_stale_skills",
+              "get_cooccurring_skills", "search_talent"],
+    "Org": ["get_org_skill_summary", "get_org_skill_experts"],
+    "Attrition": ["get_employee_attrition_risk", "get_attrition_risks",
+                  "get_high_risk_employees", "get_org_attrition_summary"],
+    "Audit": ["audit_get_recent_calls", "audit_query_calls", "audit_get_summary"],
+}
+
+
+def _html_escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _build_ui_html() -> str:
+    # Enumerate tools via internal manager
+    tools_by_name = {}
+    try:
+        for tool in mcp._tool_manager.list_tools():
+            params = []
+            schema = tool.inputSchema or {}
+            props = schema.get("properties", {})
+            required = set(schema.get("required", []))
+            for pname, pinfo in props.items():
+                if pname == "ctx":
+                    continue
+                ptype = pinfo.get("type", "")
+                default = f' = {pinfo["default"]}' if "default" in pinfo else ""
+                req = " (required)" if pname in required else ""
+                params.append(f"{pname}: {ptype}{default}{req}")
+            tools_by_name[tool.name] = {
+                "description": tool.description or "",
+                "params": params,
+            }
+    except Exception:
+        pass
+
+    # Enumerate resources
+    resources = []
+    try:
+        for r in mcp._resource_manager.list_resources():
+            resources.append({"uri": str(r.uri), "name": r.name or "", "description": r.description or ""})
+    except Exception:
+        pass
+
+    # Enumerate prompts
+    prompts = []
+    try:
+        for p in mcp._prompt_manager.list_prompts():
+            args = []
+            for a in (p.arguments or []):
+                req = " (required)" if a.required else ""
+                args.append(f"{a.name}{req}")
+            prompts.append({"name": p.name, "description": p.description or "", "args": args})
+    except Exception:
+        pass
+
+    # Build tool sections HTML
+    tool_sections = ""
+    for category, names in TOOL_CATEGORIES.items():
+        rows = ""
+        for name in names:
+            info = tools_by_name.get(name)
+            if not info:
+                continue
+            desc = _html_escape(info["description"])
+            param_list = "".join(f"<li><code>{_html_escape(p)}</code></li>" for p in info["params"])
+            params_html = f"<ul>{param_list}</ul>" if param_list else "<em>none</em>"
+            rows += f"<tr><td><code>{name}</code></td><td>{desc}</td><td>{params_html}</td></tr>\n"
+        tool_sections += f"""<h3>{category}</h3>
+<table><thead><tr><th>Tool</th><th>Description</th><th>Parameters</th></tr></thead>
+<tbody>{rows}</tbody></table>\n"""
+
+    # Build resources HTML
+    resource_rows = "".join(
+        f"<tr><td><code>{_html_escape(r['uri'])}</code></td><td>{_html_escape(r['description'])}</td></tr>"
+        for r in resources
+    )
+
+    # Build prompts HTML
+    prompt_rows = "".join(
+        f"<tr><td><code>{_html_escape(p['name'])}</code></td><td>{_html_escape(p['description'])}</td>"
+        f"<td>{', '.join(p['args']) or '<em>none</em>'}</td></tr>"
+        for p in prompts
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TM Skills MCP Server v2</title>
+<style>
+  body {{ font-family: -apple-system, system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }}
+  h1 {{ border-bottom: 2px solid #0066cc; padding-bottom: .5rem; }}
+  h2 {{ margin-top: 2rem; color: #0066cc; }}
+  h3 {{ margin-top: 1.5rem; color: #333; }}
+  table {{ border-collapse: collapse; width: 100%; margin-bottom: 1rem; }}
+  th, td {{ border: 1px solid #ddd; padding: .5rem .75rem; text-align: left; vertical-align: top; }}
+  th {{ background: #f5f5f5; }}
+  code {{ background: #f0f0f0; padding: .1rem .3rem; border-radius: 3px; font-size: .9em; }}
+  ul {{ margin: .25rem 0; padding-left: 1.2rem; }}
+  li {{ margin: .15rem 0; }}
+  .endpoint {{ color: #666; font-size: .9em; }}
+</style></head><body>
+<h1>TM Skills MCP Server v2</h1>
+<p>Talent Management Skills API exposed as MCP tools for AI assistants.</p>
+<p class="endpoint">MCP endpoint: <code>/mcp</code> &nbsp;|&nbsp; Audit REST: <code>/audit/recent</code>, <code>/audit/query</code>, <code>/audit/summary</code></p>
+
+<h2>Tools ({len(tools_by_name)})</h2>
+{tool_sections}
+
+<h2>Resources ({len(resources)})</h2>
+<table><thead><tr><th>URI</th><th>Description</th></tr></thead>
+<tbody>{resource_rows}</tbody></table>
+
+<h2>Prompts ({len(prompts)})</h2>
+<table><thead><tr><th>Prompt</th><th>Description</th><th>Arguments</th></tr></thead>
+<tbody>{prompt_rows}</tbody></table>
+</body></html>"""
+
+
+@mcp.custom_route("/", methods=["GET"])
+async def ui_home(request: Request) -> HTMLResponse:
+    return HTMLResponse(_build_ui_html())
+
+
+# --- Prompts ---
 
 
 @mcp.prompt()
@@ -721,10 +816,6 @@ def employee_retention_review(employee_id: str) -> str:
    - Factor-specific recommendations: for each high-risk factor, suggest a concrete retention action
    - Priority actions: rank recommendations by expected impact on retention"""
 
-
-# ===========================================================================
-# Entry point
-# ===========================================================================
 
 if __name__ == "__main__":
     import uvicorn
