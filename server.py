@@ -611,45 +611,34 @@ def _html_escape(text: str) -> str:
 def _build_ui_html() -> str:
     # Enumerate tools via internal manager
     tools_by_name = {}
-    try:
-        for tool in mcp._tool_manager.list_tools():
-            params = []
-            schema = tool.inputSchema or {}
-            props = schema.get("properties", {})
-            required = set(schema.get("required", []))
-            for pname, pinfo in props.items():
-                if pname == "ctx":
-                    continue
-                ptype = pinfo.get("type", "")
-                default = f' = {pinfo["default"]}' if "default" in pinfo else ""
-                req = " (required)" if pname in required else ""
-                params.append(f"{pname}: {ptype}{default}{req}")
-            tools_by_name[tool.name] = {
-                "description": tool.description or "",
-                "params": params,
-            }
-    except Exception:
-        pass
+    for tool in mcp._tool_manager.list_tools():
+        params = []
+        schema = tool.parameters or {}
+        props = schema.get("properties", {})
+        required = set(schema.get("required", []))
+        for pname, pinfo in props.items():
+            ptype = pinfo.get("type", "")
+            default = f' = {pinfo["default"]}' if "default" in pinfo else ""
+            req = " (required)" if pname in required else ""
+            params.append(f"{pname}: {ptype}{default}{req}")
+        tools_by_name[tool.name] = {
+            "description": tool.description or "",
+            "params": params,
+        }
 
     # Enumerate resources
     resources = []
-    try:
-        for r in mcp._resource_manager.list_resources():
-            resources.append({"uri": str(r.uri), "name": r.name or "", "description": r.description or ""})
-    except Exception:
-        pass
+    for r in mcp._resource_manager.list_resources():
+        resources.append({"uri": str(r.uri), "name": r.name or "", "description": r.description or ""})
 
     # Enumerate prompts
     prompts = []
-    try:
-        for p in mcp._prompt_manager.list_prompts():
-            args = []
-            for a in (p.arguments or []):
-                req = " (required)" if a.required else ""
-                args.append(f"{a.name}{req}")
-            prompts.append({"name": p.name, "description": p.description or "", "args": args})
-    except Exception:
-        pass
+    for p in mcp._prompt_manager.list_prompts():
+        args = []
+        for a in (p.arguments or []):
+            req = " (required)" if a.required else ""
+            args.append(f"{a.name}{req}")
+        prompts.append({"name": p.name, "description": p.description or "", "args": args})
 
     # Build tool sections HTML
     tool_sections = ""
