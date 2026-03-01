@@ -44,7 +44,9 @@ graph TB
     FastMCP --> Tools
     FastMCP --> Resources
     FastMCP --> Prompts
-    Tools -->|"@audited decorator"| Audit
+    Tools -->|"@audited('tool')"| Audit
+    Resources -->|"@audited('resource')"| Audit
+    Prompts -->|"@audited('prompt')"| Audit
     Tools -->|"_api_get()"| Auth
     UI -->|"GET /"| FastMCP
     AuditREST -->|"GET /audit/*"| Audit
@@ -75,7 +77,7 @@ sequenceDiagram
     API->>DB: SQL query (org hierarchy + attrition data)
     DB-->>API: Result rows
     API-->>MCP: JSON response
-    MCP->>AuditDB: INSERT tool_call record
+    MCP->>AuditDB: INSERT mcp_calls (call_type='tool')
     MCP-->>AI: MCP result (JSON text)
 
     Note over AI: Identifies top-risk employees,<br/>decides to get details
@@ -85,7 +87,7 @@ sequenceDiagram
     API->>DB: SQL query
     DB-->>API: Result
     API-->>MCP: JSON response
-    MCP->>AuditDB: INSERT tool_call record
+    MCP->>AuditDB: INSERT mcp_calls (call_type='tool')
     MCP-->>AI: MCP result
 
     AI->>MCP: tools/call: get_employee_skills(employee_id="EMP000042")
@@ -103,17 +105,20 @@ sequenceDiagram
 ### MCP Server (`server.py`)
 
 The core of the project. Responsibilities:
-- **21 MCP Tools**: Each tool wraps a single API endpoint. The AI agent reads tool descriptions to decide which to call.
-- **2 Resources**: Static context (database schema, business questions) loaded into the AI's context window.
-- **5 Prompts**: Reusable multi-step workflows that guide the AI through complex analyses.
-- **Audit REST endpoints**: Plain HTTP endpoints (`/audit/recent`, `/audit/query`, `/audit/summary`) for querying audit data without an MCP client.
+- **21 MCP Tools**: Each tool wraps a single API endpoint. The AI agent reads tool descriptions to decide which to call. Decorated with `@audited()`.
+- **2 Resources**: Static context (database schema, business questions) loaded into the AI's context window. Decorated with `@audited("resource")`.
+- **5 Prompts**: Reusable multi-step workflows that guide the AI through complex analyses. Decorated with `@audited("prompt")`.
+- **Audit REST endpoints**: Plain HTTP endpoints (`/audit/recent`, `/audit/query`, `/audit/summary`) for querying audit data without an MCP client. Support `call_type` filter parameter.
 - **UI view**: HTML dashboard at `/` listing all tools, resources, and prompts.
 
 ### Audit Logger (`audit.py`)
 
 SQLite-backed audit trail for compliance and debugging:
-- Records every tool invocation (tool name, parameters, duration, success/failure)
-- Captures MCP session metadata (session ID, client name/version)
+- Records every MCP invocation — tools, resources, and prompts — with a `call_type` discriminator (`'tool'` | `'resource'` | `'prompt'`)
+- Stores to `mcp_calls` table (migrated from the original `tool_calls` table; existing rows auto-tagged as `'tool'`)
+- Captures MCP session metadata (session ID, client name/version) for tools and prompts; resources are logged without session context
+- Supports filtering by `call_type` across all query methods and REST endpoints
+- Summary stats include a `per_type` breakdown alongside the per-tool breakdown
 - WAL mode for concurrent read/write performance
 - Lazy initialization — works even if no MCP client has connected yet
 

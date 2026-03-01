@@ -37,7 +37,9 @@ graph TB
     Tools -->|"httpx + API Key"| AuthRateVal
     AuthRateVal --> REST
     REST -->|"asyncpg (TLS)"| DB
-    Tools -->|"@audited"| AuditLog
+    Tools -->|"@audited('tool')"| AuditLog
+    Resources -->|"@audited('resource')"| AuditLog
+    Prompts -->|"@audited('prompt')"| AuditLog
 ```
 
 ## Components
@@ -47,7 +49,7 @@ graph TB
 | MCP Server | Python, FastMCP, httpx | CF (256M) | Protocol bridge: MCP → HTTP |
 | TM Skills API | Python, FastAPI, asyncpg | CF | Business logic, auth, validation |
 | PostgreSQL | PostgreSQL 15+ | AWS RDS (ap-southeast-1) | Talent data storage |
-| Audit DB | SQLite (WAL mode) | CF local filesystem | Tool invocation logging |
+| Audit DB | SQLite (WAL mode) | CF local filesystem | MCP invocation logging (tools, resources, prompts) |
 
 ## Data Model
 

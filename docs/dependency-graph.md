@@ -32,7 +32,7 @@ graph TB
         AL_init["AuditLogger.initialize()<br/>connect + WAL + schema"]
         AL_ensure["AuditLogger._ensure_db()<br/>lazy init guard"]
         AL_close["AuditLogger.close()"]
-        AL_log["AuditLogger.log_tool_call()<br/>INSERT audit record"]
+        AL_log["AuditLogger.log_call(call_type)<br/>INSERT into mcp_calls"]
         AL_fetch["AuditLogger._fetchall_dicts()<br/>execute + Row factory"]
         AL_recent["AuditLogger.query_recent()"]
         AL_filter["AuditLogger.query_with_filters()"]
@@ -54,7 +54,7 @@ graph TB
         end
 
         subgraph decorators["Decorators"]
-            audited["@audited<br/>wraps tool fn, extracts ctx metadata,<br/>measures duration, calls log_tool_call"]
+            audited["@audited(call_type)<br/>decorator factory, extracts ctx metadata,<br/>measures duration, calls log_call"]
         end
 
         subgraph helpers["Helpers"]
@@ -63,7 +63,7 @@ graph TB
             build_ui["_build_ui_html()<br/>enumerates tools/resources/prompts"]
         end
 
-        subgraph resources["MCP Resources (2)"]
+        subgraph resources["MCP Resources (2) — @audited('resource')"]
             get_schema["get_schema()<br/>tm://schema"]
             get_bq["get_business_questions()<br/>tm://business-questions"]
         end
@@ -99,8 +99,8 @@ graph TB
         end
 
         subgraph audit_tools["Audit Tools (3) — NOT audited"]
-            aud_recent["audit_get_recent_calls(limit)"]
-            aud_query["audit_query_calls(tool_name, ...)"]
+            aud_recent["audit_get_recent_calls(limit, call_type)"]
+            aud_query["audit_query_calls(tool_name, call_type, ...)"]
             aud_summary["audit_get_summary()"]
         end
 
@@ -114,12 +114,12 @@ graph TB
             ui_home["GET / → ui_home()"]
         end
 
-        subgraph prompts["MCP Prompts (5)"]
-            p_experts["find_experts(skill_name)"]
-            p_analyze["analyze_employee(employee_id)"]
-            p_org["org_talent_review(org_unit_id)"]
-            p_attrition["assess_attrition_risk(org_unit_id)"]
-            p_retention["employee_retention_review(employee_id)"]
+        subgraph prompts["MCP Prompts (5) — @audited('prompt')"]
+            p_experts["find_experts(skill_name, ctx)"]
+            p_analyze["analyze_employee(employee_id, ctx)"]
+            p_org["org_talent_review(org_unit_id, ctx)"]
+            p_attrition["assess_attrition_risk(org_unit_id, ctx)"]
+            p_retention["employee_retention_review(employee_id, ctx)"]
         end
     end
 
@@ -130,8 +130,19 @@ graph TB
     settings_inst -->|"provides db_path"| audit_logger
     settings_inst -->|"provides base_url, api_key, timeout"| api_get
 
-    %% All 18 TM tools → @audited → _api_get
+    %% All 18 TM tools → @audited('tool') → _api_get
     audited -->|"calls"| AL_log
+
+    %% Resources → @audited('resource')
+    get_schema --> audited
+    get_bq --> audited
+
+    %% Prompts → @audited('prompt')
+    p_experts --> audited
+    p_analyze --> audited
+    p_org --> audited
+    p_attrition --> audited
+    p_retention --> audited
 
     get_emp_skills --> audited
     get_emp_skills --> api_get
@@ -205,14 +216,17 @@ graph LR
         AuditTools["audit_get_recent_calls<br/>audit_query_calls<br/>audit_get_summary"]
     end
 
-    TMTools -->|"@audited decorator"| AuditLog["AuditLogger.log_tool_call()"]
+    TMTools -->|"@audited('tool')"| AuditLog["AuditLogger.log_call()"]
     TMTools -->|"HTTP call"| ApiGet["_api_get() → httpx → TM API"]
     ApiGet -->|"reads"| Config["config.settings"]
-    AuditLog -->|"SQLite write"| SQLite[("audit.db")]
+    AuditLog -->|"SQLite write"| SQLite[("audit.db<br/>mcp_calls table")]
 
-    AuditTools -->|"SQLite read"| SQLite
+    Resources["2 Resource Functions"] -->|"@audited('resource')"| AuditLog
+    Prompts["5 Prompt Functions"] -->|"@audited('prompt')"| AuditLog
 
-    REST["REST /audit/*<br/>endpoints"] -->|"SQLite read"| SQLite
+    AuditTools -->|"SQLite read<br/>(+ call_type filter)"| SQLite
+
+    REST["REST /audit/*<br/>endpoints"] -->|"SQLite read<br/>(+ call_type filter)"| SQLite
     UI["GET / endpoint"] -->|"reads metadata"| FastMCP["mcp._tool_manager<br/>mcp._resource_manager<br/>mcp._prompt_manager"]
 ```
 
