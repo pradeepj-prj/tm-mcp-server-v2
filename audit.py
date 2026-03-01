@@ -1,4 +1,4 @@
-"""SQLite-backed audit logger for MCP tool invocations."""
+"""SQLite-backed audit logger for MCP tool/resource/prompt invocations."""
 
 import json
 import logging
@@ -9,28 +9,30 @@ import aiosqlite
 logger = logging.getLogger(__name__)
 
 _SCHEMA = """
-CREATE TABLE IF NOT EXISTS tool_calls (
+CREATE TABLE IF NOT EXISTS mcp_calls (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp       TEXT    NOT NULL,
     request_id      TEXT,
     session_id      TEXT,
     client_name     TEXT,
     client_version  TEXT,
+    call_type       TEXT    NOT NULL DEFAULT 'tool',
     tool_name       TEXT    NOT NULL,
     parameters      TEXT,
     success         INTEGER NOT NULL,
     error_msg       TEXT,
     duration_ms     REAL    NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_timestamp  ON tool_calls (timestamp);
-CREATE INDEX IF NOT EXISTS idx_session_id ON tool_calls (session_id);
-CREATE INDEX IF NOT EXISTS idx_tool_name  ON tool_calls (tool_name);
-CREATE INDEX IF NOT EXISTS idx_client     ON tool_calls (client_name);
+CREATE INDEX IF NOT EXISTS idx_timestamp  ON mcp_calls (timestamp);
+CREATE INDEX IF NOT EXISTS idx_session_id ON mcp_calls (session_id);
+CREATE INDEX IF NOT EXISTS idx_tool_name  ON mcp_calls (tool_name);
+CREATE INDEX IF NOT EXISTS idx_client     ON mcp_calls (client_name);
+CREATE INDEX IF NOT EXISTS idx_call_type  ON mcp_calls (call_type);
 """
 
 
 class AuditLogger:
-    """Async SQLite audit logger — records every MCP tool invocation."""
+    """Async SQLite audit logger — records every MCP tool, resource, and prompt invocation."""
 
     def __init__(self, db_path: str) -> None:
         self._db_path = db_path
@@ -40,8 +42,30 @@ class AuditLogger:
         self._db = await aiosqlite.connect(self._db_path)
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA synchronous=NORMAL")
-        await self._db.executescript(_SCHEMA)
-        await self._db.commit()
+
+        # Migrate: rename old tool_calls table if it exists
+        cursor = await self._db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='tool_calls'"
+        )
+        old_table = await cursor.fetchone()
+        if old_table:
+            await self._db.execute("ALTER TABLE tool_calls RENAME TO mcp_calls")
+            # Add call_type column — existing rows get default 'tool'
+            try:
+                await self._db.execute(
+                    "ALTER TABLE mcp_calls ADD COLUMN call_type TEXT NOT NULL DEFAULT 'tool'"
+                )
+            except Exception:
+                pass  # column already exists
+            # Add the new index
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_call_type ON mcp_calls (call_type)"
+            )
+            await self._db.commit()
+        else:
+            # Fresh DB — create with full schema
+            await self._db.executescript(_SCHEMA)
+            await self._db.commit()
 
     async def _ensure_db(self) -> None:
         """Lazily initialize the DB connection on first use."""
@@ -57,9 +81,10 @@ class AuditLogger:
     # Write
     # ------------------------------------------------------------------
 
-    async def log_tool_call(
+    async def log_call(
         self,
         *,
+        call_type: str = "tool",
         tool_name: str,
         parameters: dict | None = None,
         success: bool,
@@ -75,10 +100,10 @@ class AuditLogger:
             await self._ensure_db()
             await self._db.execute(
                 """
-                INSERT INTO tool_calls
+                INSERT INTO mcp_calls
                     (timestamp, request_id, session_id, client_name, client_version,
-                     tool_name, parameters, success, error_msg, duration_ms)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     call_type, tool_name, parameters, success, error_msg, duration_ms)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     datetime.now(timezone.utc).isoformat(),
@@ -86,6 +111,7 @@ class AuditLogger:
                     session_id,
                     client_name,
                     client_version,
+                    call_type,
                     tool_name,
                     json.dumps(parameters) if parameters else None,
                     1 if success else 0,
@@ -95,7 +121,7 @@ class AuditLogger:
             )
             await self._db.commit()
         except Exception:
-            logger.exception("Failed to write audit record for %s", tool_name)
+            logger.exception("Failed to write audit record for %s/%s", call_type, tool_name)
 
     # ------------------------------------------------------------------
     # Read helpers
@@ -109,9 +135,14 @@ class AuditLogger:
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
-    async def query_recent(self, *, limit: int = 50) -> list[dict]:
+    async def query_recent(self, *, limit: int = 50, call_type: str | None = None) -> list[dict]:
+        if call_type:
+            return await self._fetchall_dicts(
+                "SELECT * FROM mcp_calls WHERE call_type = ? ORDER BY id DESC LIMIT ?",
+                (call_type, limit),
+            )
         return await self._fetchall_dicts(
-            "SELECT * FROM tool_calls ORDER BY id DESC LIMIT ?",
+            "SELECT * FROM mcp_calls ORDER BY id DESC LIMIT ?",
             (limit,),
         )
 
@@ -121,6 +152,7 @@ class AuditLogger:
         tool_name: str | None = None,
         session_id: str | None = None,
         client_name: str | None = None,
+        call_type: str | None = None,
         since: str | None = None,
         until: str | None = None,
         errors_only: bool = False,
@@ -129,6 +161,9 @@ class AuditLogger:
         clauses: list[str] = []
         params: list[str | int] = []
 
+        if call_type:
+            clauses.append("call_type = ?")
+            params.append(call_type)
         if tool_name:
             clauses.append("tool_name = ?")
             params.append(tool_name)
@@ -150,7 +185,7 @@ class AuditLogger:
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         params.append(limit)
         return await self._fetchall_dicts(
-            f"SELECT * FROM tool_calls{where} ORDER BY id DESC LIMIT ?",
+            f"SELECT * FROM mcp_calls{where} ORDER BY id DESC LIMIT ?",
             tuple(params),
         )
 
@@ -172,7 +207,7 @@ class AuditLogger:
                 ROUND(MAX(duration_ms), 1)                  AS max_duration_ms,
                 MIN(timestamp)                              AS first_call,
                 MAX(timestamp)                              AS last_call
-            FROM tool_calls
+            FROM mcp_calls
             """
         )
         overall = dict(await cur.fetchone())
@@ -187,10 +222,26 @@ class AuditLogger:
                                                             AS error_rate_pct,
                 ROUND(AVG(duration_ms), 1)                  AS avg_duration_ms,
                 ROUND(MAX(duration_ms), 1)                  AS max_duration_ms
-            FROM tool_calls
+            FROM mcp_calls
             GROUP BY tool_name
             ORDER BY calls DESC
             """
         )
 
-        return {"overall": overall, "per_tool": rows}
+        # Per-type breakdown
+        type_rows = await self._fetchall_dicts(
+            """
+            SELECT
+                call_type,
+                COUNT(*)                                    AS calls,
+                COUNT(DISTINCT tool_name)                   AS unique_names,
+                ROUND(100.0 * SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) / MAX(COUNT(*), 1), 1)
+                                                            AS error_rate_pct,
+                ROUND(AVG(duration_ms), 1)                  AS avg_duration_ms
+            FROM mcp_calls
+            GROUP BY call_type
+            ORDER BY calls DESC
+            """
+        )
+
+        return {"overall": overall, "per_tool": rows, "per_type": type_rows}

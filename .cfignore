@@ -7,3 +7,8 @@ __pycache__/
 .claude/
 .idea/
 .vscode/
+*.db
+*.db-shm
+*.db-wal
+test_*.py
+docs/

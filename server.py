@@ -45,70 +45,79 @@ mcp = FastMCP(
 RESOURCES_DIR = Path(__file__).parent / "resources"
 
 
-def audited(fn):
-    """Decorator that logs tool invocations to the audit database.
+def audited(call_type: str = "tool"):
+    """Decorator factory that logs MCP invocations (tools, resources, prompts) to the audit database.
 
     Extracts session/client metadata from the MCP Context, measures duration,
     and records success/failure. Never lets audit errors propagate to callers.
+
+    Usage:
+        @audited()          # defaults to call_type="tool"
+        @audited("resource")
+        @audited("prompt")
     """
 
-    @wraps(fn)
-    async def wrapper(*args, **kwargs):
-        start = time.perf_counter()
-        success = True
-        error_msg = None
+    def decorator(fn):
+        @wraps(fn)
+        async def wrapper(*args, **kwargs):
+            start = time.perf_counter()
+            success = True
+            error_msg = None
 
-        request_id = None
-        session_id = None
-        client_name = None
-        client_version = None
-        try:
-            ctx: Context | None = kwargs.get("ctx")
-            if ctx:
-                try:
-                    session_id = ctx.session.client_params.meta.sessionId
-                except Exception:
-                    pass
-                try:
-                    client_info = ctx.session.client_params.clientInfo
-                    client_name = client_info.name
-                    client_version = client_info.version
-                except Exception:
-                    pass
-                try:
-                    request_id = str(ctx.request_id)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-        params = {k: v for k, v in kwargs.items() if k != "ctx"}
-
-        try:
-            result = await fn(*args, **kwargs)
-            return result
-        except Exception as exc:
-            success = False
-            error_msg = str(exc)
-            raise
-        finally:
-            duration_ms = (time.perf_counter() - start) * 1000
+            request_id = None
+            session_id = None
+            client_name = None
+            client_version = None
             try:
-                await audit_logger.log_tool_call(
-                    tool_name=fn.__name__,
-                    parameters=params or None,
-                    success=success,
-                    error_msg=error_msg,
-                    duration_ms=duration_ms,
-                    request_id=request_id,
-                    session_id=session_id,
-                    client_name=client_name,
-                    client_version=client_version,
-                )
+                ctx: Context | None = kwargs.get("ctx")
+                if ctx:
+                    try:
+                        session_id = ctx.session.client_params.meta.sessionId
+                    except Exception:
+                        pass
+                    try:
+                        client_info = ctx.session.client_params.clientInfo
+                        client_name = client_info.name
+                        client_version = client_info.version
+                    except Exception:
+                        pass
+                    try:
+                        request_id = str(ctx.request_id)
+                    except Exception:
+                        pass
             except Exception:
-                pass  # never let audit errors propagate
+                pass
 
-    return wrapper
+            params = {k: v for k, v in kwargs.items() if k != "ctx"}
+
+            try:
+                result = await fn(*args, **kwargs)
+                return result
+            except Exception as exc:
+                success = False
+                error_msg = str(exc)
+                raise
+            finally:
+                duration_ms = (time.perf_counter() - start) * 1000
+                try:
+                    await audit_logger.log_call(
+                        call_type=call_type,
+                        tool_name=fn.__name__,
+                        parameters=params or None,
+                        success=success,
+                        error_msg=error_msg,
+                        duration_ms=duration_ms,
+                        request_id=request_id,
+                        session_id=session_id,
+                        client_name=client_name,
+                        client_version=client_version,
+                    )
+                except Exception:
+                    pass  # never let audit errors propagate
+
+        return wrapper
+
+    return decorator
 
 
 async def _api_get(path: str, params: dict | None = None) -> str:
@@ -130,13 +139,15 @@ async def _api_get(path: str, params: dict | None = None) -> str:
 
 
 @mcp.resource("tm://schema")
-def get_schema() -> str:
+@audited("resource")
+async def get_schema() -> str:
     """The TM database schema — tables, columns, types, indexes, and relationships."""
     return (RESOURCES_DIR / "tm_schema.sql").read_text()
 
 
 @mcp.resource("tm://business-questions")
-def get_business_questions() -> str:
+@audited("resource")
+async def get_business_questions() -> str:
     """Catalog of 12 business questions the TM Skills API can answer, with endpoint mappings."""
     return (RESOURCES_DIR / "business_questions.md").read_text()
 
@@ -145,7 +156,7 @@ def get_business_questions() -> str:
 
 
 @mcp.tool()
-@audited
+@audited()
 async def get_employee_skills(employee_id: str, ctx: Context = None) -> str:
     """Get the full skill profile for an employee — all skills with proficiency (0-5),
     confidence (0-100), source, and last updated date.
@@ -157,7 +168,7 @@ async def get_employee_skills(employee_id: str, ctx: Context = None) -> str:
 
 
 @mcp.tool()
-@audited
+@audited()
 async def get_skill_evidence(employee_id: str, skill_id: float, ctx: Context = None) -> str:
     """Get the evidence behind an employee's skill rating — certifications, projects,
     assessments, peer endorsements, etc.
@@ -170,7 +181,7 @@ async def get_skill_evidence(employee_id: str, skill_id: float, ctx: Context = N
 
 
 @mcp.tool()
-@audited
+@audited()
 async def get_top_skills(employee_id: str, limit: float = 10, ctx: Context = None) -> str:
     """Get an employee's strongest skills ranked by proficiency and confidence —
     a "skill passport" view.
@@ -186,7 +197,7 @@ async def get_top_skills(employee_id: str, limit: float = 10, ctx: Context = Non
 
 
 @mcp.tool()
-@audited
+@audited()
 async def get_evidence_inventory(employee_id: str, ctx: Context = None) -> str:
     """Get ALL evidence items across ALL skills for an employee — the complete
     evidence inventory (certifications, projects, endorsements).
@@ -201,7 +212,7 @@ async def get_evidence_inventory(employee_id: str, ctx: Context = None) -> str:
 
 
 @mcp.tool()
-@audited
+@audited()
 async def browse_skills(
     category: str | None = None,
     search: str | None = None,
@@ -223,7 +234,7 @@ async def browse_skills(
 
 
 @mcp.tool()
-@audited
+@audited()
 async def get_top_experts(
     skill_id: float,
     min_proficiency: float = 4,
@@ -244,7 +255,7 @@ async def get_top_experts(
 
 
 @mcp.tool()
-@audited
+@audited()
 async def get_skill_coverage(
     skill_id: float,
     min_proficiency: float = 3,
@@ -264,7 +275,7 @@ async def get_skill_coverage(
 
 
 @mcp.tool()
-@audited
+@audited()
 async def get_evidence_backed_candidates(
     skill_id: float,
     min_proficiency: float = 3,
@@ -292,7 +303,7 @@ async def get_evidence_backed_candidates(
 
 
 @mcp.tool()
-@audited
+@audited()
 async def get_stale_skills(
     skill_id: float,
     older_than_days: float = 365,
@@ -312,7 +323,7 @@ async def get_stale_skills(
 
 
 @mcp.tool()
-@audited
+@audited()
 async def get_cooccurring_skills(
     skill_id: float,
     min_proficiency: float = 3,
@@ -337,7 +348,7 @@ async def get_cooccurring_skills(
 
 
 @mcp.tool()
-@audited
+@audited()
 async def search_talent(
     skills: str,
     min_proficiency: float = 3,
@@ -360,7 +371,7 @@ async def search_talent(
 
 
 @mcp.tool()
-@audited
+@audited()
 async def get_org_skill_summary(
     org_unit_id: str,
     limit: float = 20,
@@ -380,7 +391,7 @@ async def get_org_skill_summary(
 
 
 @mcp.tool()
-@audited
+@audited()
 async def get_org_skill_experts(
     org_unit_id: str,
     skill_id: float,
@@ -407,7 +418,7 @@ async def get_org_skill_experts(
 
 
 @mcp.tool()
-@audited
+@audited()
 async def get_employee_attrition_risk(employee_id: str, ctx: Context = None) -> str:
     """Predict attrition risk for a single employee.
     Returns probability, risk level (low/medium/high/critical), and factor breakdown.
@@ -419,7 +430,7 @@ async def get_employee_attrition_risk(employee_id: str, ctx: Context = None) -> 
 
 
 @mcp.tool()
-@audited
+@audited()
 async def get_attrition_risks(
     ctx: Context = None,
     limit: float = 50,
@@ -443,7 +454,7 @@ async def get_attrition_risks(
 
 
 @mcp.tool()
-@audited
+@audited()
 async def get_high_risk_employees(
     ctx: Context = None,
     threshold: float = 0.25,
@@ -466,7 +477,7 @@ async def get_high_risk_employees(
 
 
 @mcp.tool()
-@audited
+@audited()
 async def get_org_attrition_summary(
     org_unit_id: str,
     ctx: Context = None,
@@ -488,7 +499,7 @@ async def get_org_attrition_summary(
 
 
 @mcp.tool()
-@audited
+@audited()
 async def search_employees(name: str, ctx: Context = None, limit: float = 20) -> str:
     """Search employees by name (partial match, case-insensitive).
     Useful for finding employee IDs when you only know a name.
@@ -507,13 +518,14 @@ async def search_employees(name: str, ctx: Context = None, limit: float = 20) ->
 
 
 @mcp.tool()
-async def audit_get_recent_calls(limit: float = 50) -> str:
-    """Get the most recent MCP tool invocations from the audit log.
+async def audit_get_recent_calls(limit: float = 50, call_type: str | None = None) -> str:
+    """Get the most recent MCP invocations from the audit log.
 
     Args:
         limit: Number of recent calls to return (1-500, default 50)
+        call_type: Filter by type — "tool", "resource", or "prompt" (default: all types)
     """
-    rows = await audit_logger.query_recent(limit=int(limit))
+    rows = await audit_logger.query_recent(limit=int(limit), call_type=call_type)
     return json.dumps(rows, indent=2)
 
 
@@ -522,17 +534,19 @@ async def audit_query_calls(
     tool_name: str | None = None,
     session_id: str | None = None,
     client_name: str | None = None,
+    call_type: str | None = None,
     since: str | None = None,
     until: str | None = None,
     errors_only: bool = False,
     limit: float = 100,
 ) -> str:
-    """Query the audit log with filters — find calls by tool, session, client, or time range.
+    """Query the audit log with filters — find calls by tool/resource/prompt name, session, client, type, or time range.
 
     Args:
-        tool_name: Filter by tool name (e.g. "get_employee_skills")
+        tool_name: Filter by name (e.g. "get_employee_skills", "get_schema", "find_experts")
         session_id: Filter by MCP session ID
         client_name: Filter by client name from MCP handshake
+        call_type: Filter by type — "tool", "resource", or "prompt" (default: all types)
         since: Start of time range (ISO 8601, e.g. "2026-02-01")
         until: End of time range (ISO 8601, e.g. "2026-02-28")
         errors_only: If true, only return failed calls
@@ -542,6 +556,7 @@ async def audit_query_calls(
         tool_name=tool_name,
         session_id=session_id,
         client_name=client_name,
+        call_type=call_type,
         since=since,
         until=until,
         errors_only=errors_only,
@@ -565,7 +580,8 @@ async def audit_get_summary() -> str:
 @mcp.custom_route("/audit/recent", methods=["GET"])
 async def audit_recent_http(request: Request) -> JSONResponse:
     limit = int(request.query_params.get("limit", "50"))
-    rows = await audit_logger.query_recent(limit=limit)
+    call_type = request.query_params.get("call_type")
+    rows = await audit_logger.query_recent(limit=limit, call_type=call_type)
     return JSONResponse(rows)
 
 
@@ -575,6 +591,7 @@ async def audit_query_http(request: Request) -> JSONResponse:
         tool_name=request.query_params.get("tool_name"),
         session_id=request.query_params.get("session_id"),
         client_name=request.query_params.get("client_name"),
+        call_type=request.query_params.get("call_type"),
         since=request.query_params.get("since"),
         until=request.query_params.get("until"),
         errors_only=request.query_params.get("errors_only", "").lower() == "true",
@@ -711,7 +728,8 @@ async def ui_home(request: Request) -> HTMLResponse:
 
 
 @mcp.prompt()
-def find_experts(skill_name: str) -> str:
+@audited("prompt")
+async def find_experts(skill_name: str, ctx: Context = None) -> str:
     """Guide the assistant to find experts for a given skill.
 
     Args:
@@ -728,7 +746,8 @@ def find_experts(skill_name: str) -> str:
 
 
 @mcp.prompt()
-def analyze_employee(employee_id: str) -> str:
+@audited("prompt")
+async def analyze_employee(employee_id: str, ctx: Context = None) -> str:
     """Build a comprehensive talent profile for an employee.
 
     Args:
@@ -746,7 +765,8 @@ def analyze_employee(employee_id: str) -> str:
 
 
 @mcp.prompt()
-def org_talent_review(org_unit_id: str) -> str:
+@audited("prompt")
+async def org_talent_review(org_unit_id: str, ctx: Context = None) -> str:
     """Assess an organization's talent landscape.
 
     Args:
@@ -764,7 +784,8 @@ def org_talent_review(org_unit_id: str) -> str:
 
 
 @mcp.prompt()
-def assess_attrition_risk(org_unit_id: str) -> str:
+@audited("prompt")
+async def assess_attrition_risk(org_unit_id: str, ctx: Context = None) -> str:
     """Review attrition risk for an org unit and recommend retention actions.
 
     Args:
@@ -785,7 +806,8 @@ def assess_attrition_risk(org_unit_id: str) -> str:
 
 
 @mcp.prompt()
-def employee_retention_review(employee_id: str) -> str:
+@audited("prompt")
+async def employee_retention_review(employee_id: str, ctx: Context = None) -> str:
     """Deep-dive into a single employee's flight risk and suggest retention strategies.
 
     Args:
